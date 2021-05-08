@@ -6,6 +6,7 @@ import marshmallow
 import requests
 import sqlalchemy as s
 from sqlalchemy import CheckConstraint as check
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import relationship
 
 from ..entities._entity import (
@@ -18,8 +19,9 @@ from ..entities._entity import (
 )
 from ..entities.case import Case
 from ..entities.context import Context
-from ..entities.data import Data
 from ..entities.commit import Commit, parse_commit
+from ..entities.data import Data
+from ..entities.distribution import Distribution, get_distribution
 from ..entities.machine import Machine, MachineSchema
 from ..entities.run import Run
 from ..entities.time import Time
@@ -29,12 +31,12 @@ class Summary(Base, EntityMixin):
     __tablename__ = "summary"
     id = NotNull(s.String(50), primary_key=True, default=generate_uuid)
     case_id = NotNull(s.String(50), s.ForeignKey("case.id"))
-    machine_id = NotNull(s.String(50), s.ForeignKey("machine.id"))
     context_id = NotNull(s.String(50), s.ForeignKey("context.id"))
+    machine_id = NotNull(s.String(50), s.ForeignKey("machine.id"))
     run_id = NotNull(s.Text, s.ForeignKey("run.id"))
     case = relationship("Case", lazy="joined")
-    machine = relationship("Machine", lazy="select")
     context = relationship("Context", lazy="select")
+    machine = relationship("Machine", lazy="select")
     run = relationship("Run", lazy="select")
     data = relationship(
         "Data",
@@ -131,8 +133,8 @@ class Summary(Base, EntityMixin):
             )
 
         stats["case_id"] = case.id
-        stats["machine_id"] = machine.id
         stats["context_id"] = context.id
+        stats["machine_id"] = machine.id
         summary = Summary(**stats)
         summary.save()
 
@@ -147,6 +149,30 @@ class Summary(Base, EntityMixin):
         for i, x in enumerate(times):
             bulk.append(Time(result=x, summary_id=summary.id, iteration=i + 1))
         Time.bulk_save_objects(bulk)
+
+        from ..db import engine
+
+        distribution = get_distribution(
+            repository,
+            sha,
+            summary.case_id,
+            summary.context_id,
+            summary.machine_id,
+            1000,
+        ).first()
+
+        if distribution:
+            values = dict(distribution)
+            with engine.connect() as conn:
+                conn.execute(
+                    insert(Distribution.__table__)
+                    .values(values)
+                    .on_conflict_do_update(
+                        index_elements=["sha", "case_id", "context_id", "machine_id"],
+                        set_=values,
+                    )
+                )
+                conn.commit()
 
         return summary
 
